@@ -212,12 +212,12 @@ src/
 bench/           hand-written baselines + benchmark harness
 sim/             512-agent game-loop integration test
 tools/           calibrate.py (threshold sweep), gen_stress.py
-examples/        5 valid machines (nested, parallel, actions), 8 deliberately broken
+examples/        5 valid machines (nested, parallel, actions), 9 deliberately broken
 tests/           regression suite + hierarchy and parallel assertions
-docs/            CALIBRATION.md, LANGUAGE.md, CLAIMS.md, VIVA_PREP.md
+docs/            LANGUAGE.md (language reference), CALIBRATION.md (threshold sweep)
 ```
 
-2,966 lines of compiler (C++, Flex, Bison), plus 1,926 lines of tests,
+3,025 lines of compiler (C++, Flex, Bison), plus 2,057 lines of tests,
 benchmarks and tooling.
 
 ## Demonstration
