@@ -1,0 +1,26 @@
+// ---------------------------------------------------------------------------
+//  Three engine-call faults, all of which a C++ compiler would only catch
+//  after the code had been generated -- and only if it were generated at all.
+//
+//  Expected: AEG-E019 (undeclared), AEG-E020 (arity), AEG-E021 (argument type)
+// ---------------------------------------------------------------------------
+
+machine BadCalls {
+
+    context { int ammo = 10; }
+
+    events { Fire }
+
+    actions {
+        PlayAnim(int clip);
+    }
+
+    initial state Idle {
+        on enter {
+            PlaySound(3);          // AEG-E019: never declared
+            PlayAnim();            // AEG-E020: takes 1 argument, 0 given
+            PlayAnim(true);        // AEG-E021: bool where int was declared
+        }
+        on Fire -> Idle;
+    }
+}

@@ -1,0 +1,34 @@
+// ---------------------------------------------------------------------------
+//  Turret - engine actions.
+//
+//  The smallest machine in the set, used to show the part of the language that
+//  lets behaviour reach the game. An `actions` block declares what the host
+//  engine supplies; every call site is checked for arity and argument type
+//  before any C++ exists, and the calls lower to plain free functions the
+//  linker resolves -- no virtual dispatch, no function pointers, no allocation.
+// ---------------------------------------------------------------------------
+
+machine Turret {
+
+    context {
+        int ammo = 30;
+    }
+
+    events { Target, Clear }
+
+    actions {
+        PlayAnim(int clip);
+        Shout(int volume, float pitch);
+    }
+
+    initial state Idle {
+        on enter { PlayAnim(1); }
+        on Target -> Firing when ammo > 0;
+    }
+
+    state Firing {
+        on enter  { PlayAnim(2); Shout(80, 1.2); }
+        on update { ammo = ammo - 1; }
+        on Clear  -> Idle;
+    }
+}

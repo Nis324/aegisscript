@@ -1,0 +1,64 @@
+// ---------------------------------------------------------------------------
+//  MechPilot - parallel regions.
+//
+//  While Active, the mech is doing two independent things at once: it has a
+//  movement mode AND a weapon state. Those are orthogonal -- drawing a weapon
+//  does not change how fast you are moving, and sprinting does not holster
+//  anything.
+//
+//  Written as one flat machine you would need Walking_Holstered,
+//  Walking_Drawn, Running_Holstered, Running_Drawn by hand, and every
+//  transition four times. Here each region is described once.
+// ---------------------------------------------------------------------------
+
+machine MechPilot {
+
+    context {
+        int  alert = 0;
+        int  gear  = 0;
+        bool armed = false;
+        int  hull  = 100;
+    }
+
+    events { Boot, Sprint, Tire, Draw, Holster, Destroy }
+
+    initial state Offline {
+        on enter { alert = 0; gear = 0; armed = false; }
+        on Boot -> Active;
+    }
+
+    parallel state Active {
+        on enter { alert = 1; }
+        on exit  { alert = 0; }
+
+        // declared once, inherited by every product state
+        on Destroy -> Wrecked;
+
+        state Movement {
+            initial state Walking {
+                on enter  { gear = 1; }
+                on Sprint -> Running;
+            }
+            state Running {
+                on enter  { gear = 2; }
+                on update { hull = hull - 1; }
+                on Tire   -> Walking;
+            }
+        }
+
+        state Weapon {
+            initial state Holstered {
+                on enter { armed = false; }
+                on Draw  -> Drawn;
+            }
+            state Drawn {
+                on enter   { armed = true; }
+                on Holster -> Holstered;
+            }
+        }
+    }
+
+    final state Wrecked {
+        on enter { alert = 0; gear = 0; armed = false; }
+    }
+}

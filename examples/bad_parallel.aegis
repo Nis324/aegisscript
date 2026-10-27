@@ -1,0 +1,23 @@
+// NEGATIVE TEST - expects AEG-E025 (cross-region event conflict).
+// Both regions want to handle 'Alarm'. Firing both simultaneously would need
+// the compiler to conjoin their guards and multiply the transition set, so it
+// is rejected explicitly rather than one region silently winning.
+machine Conflicted {
+
+    events { Go, Alarm }
+
+    initial state Idle {
+        on Go -> Both;
+    }
+
+    parallel state Both {
+        state Left {
+            initial state L1 { on Alarm -> L2; }
+            state L2 { on Go -> L1; }
+        }
+        state Right {
+            initial state R1 { on Alarm -> R2; }   // <-- same event, other region
+            state R2 { on Go -> R1; }
+        }
+    }
+}

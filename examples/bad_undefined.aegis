@@ -1,0 +1,19 @@
+// NEGATIVE TEST - expects AEG-E006, AEG-E007, AEG-E008, AEG-E011.
+machine Sloppy {
+
+    context {
+        int health = 100;
+    }
+
+    events { Hit }
+
+    initial state Idle {
+        on Hit   -> Flee;              // AEG-E006: 'Flee' is never defined
+        on Heal  -> Idle;              // AEG-E007: 'Heal' is not a declared event
+        on Hit   -> Idle;              // AEG-E011: second unconditional 'Hit'
+    }
+
+    state Hurt {
+        on Hit -> Idle when mana < 5;  // AEG-E008: 'mana' is not in context
+    }
+}

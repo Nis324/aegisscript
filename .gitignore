@@ -1,0 +1,15 @@
+build/
+out/
+demo_out/
+aegisc
+*.o
+*.bak
+.DS_Store
+.vscode/
+.idea/
+examples/crowd.aegis
+docs/build_*.js
+docs/PHASES.md
+docs/VIVA_PREP.md
+docs/CLAIMS.md
+CHECKLIST.md

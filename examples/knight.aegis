@@ -1,0 +1,80 @@
+// ---------------------------------------------------------------------------
+//  KnightAI - hierarchical NPC behaviour.
+//
+//  The point of the nesting: "Killed -> Dead" and "Staggered -> Recovering"
+//  are declared ONCE, on the composite state, and every substate inherits
+//  them. Written flat, those two transitions would have to be repeated on
+//  every single combat substate, and the day someone adds a new substate and
+//  forgets one is the day the knight becomes immortal in one animation frame.
+//
+//  Combat is a composite with three phases. Entering Combat from anywhere
+//  lands in Windup, because Windup is the initial child. Moving between the
+//  phases does NOT re-run Combat's entry action -- only the phase's own.
+// ---------------------------------------------------------------------------
+
+machine KnightAI {
+
+    context {
+        int   rage     = 0;
+        int   phase    = 0;
+        float stamina  = 100.0;
+        bool  shielded = true;
+    }
+
+    events {
+        SpotEnemy,
+        LoseEnemy,
+        Swing,
+        Connect,
+        Staggered,
+        Recover,
+        Killed
+    }
+
+    initial state Idle {
+        on enter  { rage = 0; phase = 0; }
+        on update { stamina = stamina + 1.0; }
+
+        on SpotEnemy -> Combat;
+        on Killed    -> Dead;
+    }
+
+    // --- composite: everything below inherits Staggered and Killed ---------
+    state Combat {
+        on enter { rage = 1; }
+        on exit  { rage = 0; phase = 0; }
+
+        // declared once, inherited by Windup, Strike and Recovering
+        on Staggered -> Recovering;
+        on Killed    -> Dead;
+        on LoseEnemy -> Idle;
+
+        initial state Windup {
+            on enter  { phase = 1; }
+            on update { stamina = stamina - 0.5; }
+
+            on Swing -> Strike when stamina > 10.0;
+        }
+
+        state Strike {
+            on enter  { phase = 2; }
+            on update { stamina = stamina - 2.0; }
+
+            on Connect -> Recovering;
+            // Strike overrides the inherited Staggered: being hit mid-swing
+            // throws the knight right out of combat rather than into recovery
+            on Staggered -> Idle;
+        }
+
+        state Recovering {
+            on enter  { phase = 3; }
+            on update { stamina = stamina + 0.5; }
+
+            on Recover -> Windup;
+        }
+    }
+
+    final state Dead {
+        on enter { rage = 0; phase = 0; shielded = false; }
+    }
+}

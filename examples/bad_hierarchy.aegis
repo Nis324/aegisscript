@@ -1,0 +1,22 @@
+// NEGATIVE TEST - expects AEG-E016 (composite with no initial child).
+// Entering 'Attack' has no defined destination: nothing says which phase
+// the NPC starts in.
+machine BadNest {
+
+    events { Engage, Done }
+
+    initial state Idle {
+        on Engage -> Attack;
+    }
+
+    state Attack {
+        on Done -> Idle;
+
+        state Windup {          // <-- neither child is marked initial
+            on Done -> Strike;
+        }
+        state Strike {
+            on Done -> Windup;
+        }
+    }
+}

@@ -1,0 +1,31 @@
+// ---------------------------------------------------------------------------
+//  Four separate syntax faults in one file.
+//
+//  Without error recovery a parser reports the first and stops, so fixing a
+//  file with several mistakes takes several compile-edit cycles. This grammar
+//  recovers in panic mode: on a syntax error it discards tokens until it
+//  reaches a semicolon, then resumes parsing from a state it can trust.
+//
+//  All four are therefore reported in a single run.
+// ---------------------------------------------------------------------------
+
+machine BadSyntax {
+
+    context {
+        int   alertLevel = ;          // 1. missing initialiser expression
+        float stamina 100.0;          // 2. missing '='
+        bool  ready = true;           //    (this one is fine)
+    }
+
+    events { Spotted, Lost }
+
+    initial state Patrol {
+        on enter { alertLevel = ; }   // 3. missing right-hand side
+        on Spotted ->> Chase;         // 4. malformed arrow
+        on Lost    -> Patrol;         //    (this one is fine)
+    }
+
+    state Chase {
+        on Lost -> Patrol;
+    }
+}

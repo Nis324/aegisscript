@@ -1,0 +1,18 @@
+// NEGATIVE TEST - expects AEG-E013 (unreachable state).
+// Nothing ever transitions into 'Berserk'; the code for it would be dead weight.
+machine Orphan {
+
+    events { Provoke, Calm }
+
+    initial state Idle {
+        on Provoke -> Angry;
+    }
+
+    state Angry {
+        on Calm -> Idle;
+    }
+
+    state Berserk {          // <-- no inbound edge
+        on Calm -> Idle;
+    }
+}

@@ -1,0 +1,499 @@
+#include "codegen.hpp"
+#include <ios>
+
+#include <sstream>
+#include <vector>
+#include <algorithm>
+#include <array>
+
+namespace aegis {
+
+const char* binOpCxx(BinOp op) {
+    switch (op) {
+        case BinOp::Add: return "+";  case BinOp::Sub: return "-";
+        case BinOp::Mul: return "*";  case BinOp::Div: return "/";
+        case BinOp::Lt:  return "<";  case BinOp::Le:  return "<=";
+        case BinOp::Gt:  return ">";  case BinOp::Ge:  return ">=";
+        case BinOp::Eq:  return "=="; case BinOp::Ne:  return "!=";
+        case BinOp::And: return "&&"; case BinOp::Or:  return "||";
+    }
+    return "?";
+}
+const char* unOpCxx(UnOp op) { return op == UnOp::Neg ? "-" : "!"; }
+
+namespace {
+
+const char* cxxType(VarType t) {
+    switch (t) {
+        case VarType::Int:   return "int32_t";
+        case VarType::Float: return "float";
+        case VarType::Bool:  return "bool";
+        default:             return "int32_t";
+    }
+}
+
+std::string emitExpr(const Expr* e) {
+    if (!e) return "true";
+    std::ostringstream o;
+    switch (e->kind) {
+        case ExprKind::IntLit:   o << e->ival; break;
+        case ExprKind::FloatLit: {
+            std::ostringstream n;
+            n.setf(std::ios::fixed);
+            n.precision(6);
+            n << e->fval;
+            std::string s = n.str();
+            // trim trailing zeros but always keep one digit after the point
+            size_t last = s.find_last_not_of('0');
+            if (s[last] == '.') ++last;
+            o << s.substr(0, last + 1) << "f";
+            break;
+        }
+        case ExprKind::BoolLit:  o << (e->bval ? "true" : "false"); break;
+        case ExprKind::VarRef:   o << "ctx." << e->name; break;
+        case ExprKind::Unary:    o << "(" << unOpCxx(e->uop) << emitExpr(e->lhs) << ")"; break;
+        case ExprKind::Binary:
+            o << "(" << emitExpr(e->lhs) << " " << binOpCxx(e->bop)
+              << " " << emitExpr(e->rhs) << ")";
+            break;
+    }
+    return o.str();
+}
+
+void emitBlock(std::ostringstream& o, const Block& b, const char* indent,
+               const Machine& m) {
+    for (const auto& s : b) {
+        if (s.kind == StmtKind::Call) {
+            // Lowered to a free function call in the hooks namespace: no virtual
+            // dispatch, no indirection, resolved at link time.
+            o << indent << "hooks::" << s.target << "(ctx";
+            for (const auto* a : s.args) o << ", " << emitExpr(a);
+            o << ");\n";
+            (void)m;
+            continue;
+        }
+        o << indent << "ctx." << s.target << " = " << emitExpr(s.value) << ";\n";
+    }
+}
+
+// Flattened transition record, grouped by (state, event).
+struct Rec {
+    int stateId;
+    int eventId;
+    int targetId;
+    const Expr* guard;
+    const Transition* src;      // for the hierarchy exit / entry chains
+};
+
+} // namespace
+
+CodegenResult generate(const Machine& m,
+                       const GraphFacts& f,
+                       const LayoutPlan& plan,
+                       const std::string& sourceFile) {
+    CodegenResult out;
+
+    // ---- emitted state space: unreachable states are excluded ------------
+    std::vector<const State*> live;
+    std::vector<int> remap(m.states.size(), -1);
+    for (const auto& s : m.states)
+        if (s.reachable) { remap[s.id] = static_cast<int>(live.size()); live.push_back(&s); }
+
+    const int S = static_cast<int>(live.size());
+    const int E = static_cast<int>(m.events.size());
+    out.emittedStates = S;
+    out.emittedEvents = E;
+
+    int startId = 0;
+    for (int i = 0; i < S; ++i) if (live[i]->isInitial) startId = i;
+
+    // ---- flatten transitions, grouped by (state, event) ------------------
+    std::vector<Rec> recs;
+    std::vector<std::pair<int,int>> cellIndex(static_cast<size_t>(std::max(S * E, 1)), {-1, 0});
+    for (int si = 0; si < S; ++si) {
+        for (int ei = 0; ei < E; ++ei) {
+            int first = static_cast<int>(recs.size());
+            int count = 0;
+            // unguarded transitions are ordered last so guards win ties
+            for (int pass = 0; pass < 2; ++pass) {
+                for (const auto& t : live[si]->transitions) {
+                    if (t.eventId != ei || t.targetId < 0) continue;
+                    bool guarded = (t.guard != nullptr);
+                    if ((pass == 0) != guarded) continue;
+                    recs.push_back({si, ei, remap[t.targetId], t.guard, &t});
+                    ++count;
+                }
+            }
+            if (count) cellIndex[static_cast<size_t>(si) * E + ei] = {first, count};
+        }
+    }
+
+    const std::string cls = m.name;
+    const std::string guardHdr = cls + "_AEGIS_GENERATED_H";
+
+    // ======================================================== HEADER ======
+    {
+        std::ostringstream o;
+        o << "// ==========================================================================\n"
+          << "// GENERATED BY AegisScript " << "v0.3" << " -- DO NOT EDIT BY HAND\n"
+          << "// source              : " << sourceFile << "\n"
+          << "// synthesis strategy  : " << strategyName(plan.strategy) << "\n"
+          << "// transition storage  : " << plan.tableBytes << " bytes, static, no heap\n"
+          << "// worst-case dispatch : " << plan.worstCaseProbes << " probe(s)\n";
+        if (plan.prunedStates)
+            o << "// pruned states       : " << plan.prunedStates << " (proved unreachable)\n";
+        o << "// ==========================================================================\n"
+          << "#pragma once\n#include <cstdint>\n\n"
+          << "namespace aegis_gen {\n\n";
+
+        o << "enum class " << cls << "State : uint" << plan.stateWidthBits << "_t {\n";
+        for (int i = 0; i < S; ++i)
+            o << "    " << live[i]->name << " = " << i << ",\n";
+        o << "    COUNT = " << S << "\n};\n\n";
+
+        o << "enum class " << cls << "Event : uint" << plan.eventWidthBits << "_t {\n";
+        for (int i = 0; i < E; ++i)
+            o << "    " << m.events[i] << " = " << i << ",\n";
+        o << "    COUNT = " << E << "\n};\n\n";
+
+        o << "struct " << cls << "Context {\n";
+        for (const auto& v : m.context) {
+            o << "    " << cxxType(v.type) << " " << v.name;
+            if (v.init) o << " = " << emitExpr(v.init);
+            else        o << " = " << (v.type == VarType::Bool ? "false" : "0");
+            o << ";\n";
+        }
+        o << "};\n\n";
+
+        if (!m.actions.empty()) {
+            o << "// --------------------------------------------------------------------------\n"
+              << "// ENGINE HOOKS -- you must define these somewhere in your project.\n"
+              << "// They are plain free functions: no virtual dispatch, no allocation, and\n"
+              << "// the linker catches any you forget.\n"
+              << "// --------------------------------------------------------------------------\n"
+              << "namespace hooks {\n";
+            for (const auto& a : m.actions) {
+                o << "    void " << a.name << "(" << cls << "Context& ctx";
+                for (size_t i = 0; i < a.params.size(); ++i) {
+                    o << ", " << cxxType(a.params[i]) << " ";
+                    o << (a.paramNames[i].empty() ? ("arg" + std::to_string(i + 1))
+                                                  : a.paramNames[i]);
+                }
+                o << ");\n";
+            }
+            o << "} // namespace hooks\n\n";
+        }
+
+        o << "class " << cls << " {\npublic:\n"
+          << "    " << cls << "();\n\n"
+          << "    // Feeds one event to the machine.\n"
+          << "    // Returns true if a transition fired.\n"
+          << "    bool dispatch(" << cls << "Event ev);\n\n"
+          << "    // Per-frame tick for the current state.\n"
+          << "    void update();\n\n"
+          << "    void reset();\n\n"
+          << "    " << cls << "State state() const { return state_; }\n"
+          << "    const char* stateName() const;\n"
+          << "    static const char* stateName(" << cls << "State s);\n"
+          << "    static const char* eventName(" << cls << "Event e);\n\n"
+          << "    " << cls << "Context ctx;\n\n"
+          << "private:\n"
+          << "    " << cls << "State state_;\n"
+          << "    void onEnterNode_(uint16_t node);\n"
+          << "    void onExitNode_(uint16_t node);\n"
+          << "    bool guard_(uint16_t id) const;\n"
+          << "};\n\n"
+          << "} // namespace aegis_gen\n";
+
+        out.header = o.str();
+    }
+
+    // ======================================================== SOURCE ======
+    {
+        std::ostringstream o;
+        o << "// GENERATED BY AegisScript v0.3 -- DO NOT EDIT BY HAND\n"
+          << "// source: " << sourceFile << "\n\n"
+          << "#include \"" << cls << ".h\"\n\n"
+          << "namespace aegis_gen {\nnamespace {\n\n";
+
+        // --- guard ids ----------------------------------------------------
+        o << "constexpr int16_t kNoGuard = -1;\n\n";
+
+        o << "struct TransitionRec {\n"
+          << "    uint" << plan.stateWidthBits << "_t target;\n"
+          << "    int16_t  guard;        // kNoGuard == unconditional\n"
+          << "    uint16_t exitFirst;    // slice of kChain: nodes to exit, innermost first\n"
+          << "    uint8_t  exitCount;\n"
+          << "    uint16_t enterFirst;   // slice of kChain: nodes to enter, outermost first\n"
+          << "    uint8_t  enterCount;\n"
+          << "};\n\n";
+
+        // assign guard ids
+        std::vector<const Expr*> guards;
+        std::vector<int> guardId(recs.size(), -1);
+        for (size_t i = 0; i < recs.size(); ++i)
+            if (recs[i].guard) { guardId[i] = static_cast<int>(guards.size()); guards.push_back(recs[i].guard); }
+
+        // Flat pool of node ids that the exit / entry chains index into. For a
+        // machine with no nesting every chain is one element long and this
+        // collapses to exactly what a flat machine needs.
+        std::vector<int> chain;
+        std::vector<std::array<int,4>> chainIdx(recs.size(), {0,0,0,0});
+        for (size_t i = 0; i < recs.size(); ++i) {
+            const Transition* t = recs[i].src;
+            int ef = static_cast<int>(chain.size());
+            if (t) for (int n : t->exitNodes) chain.push_back(n);
+            int ec = static_cast<int>(chain.size()) - ef;
+            int nf = static_cast<int>(chain.size());
+            if (t) for (int n : t->enterNodes) chain.push_back(n);
+            int nc = static_cast<int>(chain.size()) - nf;
+            chainIdx[i] = { ef, ec, nf, nc };
+        }
+
+        o << "const uint16_t kChain[] = {";
+        if (chain.empty()) o << " 0 ";
+        for (size_t i = 0; i < chain.size(); ++i)
+            o << (i ? ", " : " ") << chain[i];
+        o << " };\n\n";
+
+        o << "const TransitionRec kTransitions[] = {\n";
+        if (recs.empty()) o << "    { 0, kNoGuard, 0, 0, 0, 0 }\n";
+        for (size_t i = 0; i < recs.size(); ++i) {
+            o << "    { " << recs[i].targetId << ", ";
+            if (guardId[i] >= 0) o << guardId[i]; else o << "kNoGuard";
+            o << ", " << chainIdx[i][0] << ", " << chainIdx[i][1]
+              << ", " << chainIdx[i][2] << ", " << chainIdx[i][3]
+              << " },   // " << live[recs[i].stateId]->display() << " --"
+              << m.events[recs[i].eventId] << "--> " << live[recs[i].targetId]->display() << "\n";
+        }
+        o << "};\n\n";
+
+        if (plan.strategy == Strategy::DenseTable) {
+            o << "// Dense [state][event] dispatch matrix: one indexed load, no compare chain.\n"
+              << "struct Cell { int16_t first; uint8_t count; };\n"
+              << "const Cell kTable[" << S << "][" << E << "] = {\n";
+            for (int si = 0; si < S; ++si) {
+                o << "    { ";
+                for (int ei = 0; ei < E; ++ei) {
+                    auto c = cellIndex[static_cast<size_t>(si) * E + ei];
+                    o << "{ " << c.first << ", " << c.second << " }";
+                    if (ei + 1 < E) o << ", ";
+                }
+                o << " },   // " << live[si]->name << "\n";
+            }
+            o << "};\n\n";
+        } else if (plan.strategy == Strategy::LinearScan) {
+            o << "// Linear scan: a single flat, ordered array of populated cells. No index\n"
+              << "// structure at all -- at this size the index costs more than the scan.\n"
+              << "struct Slice { uint16_t key; int16_t first; uint8_t count; };\n"
+              << "const Slice kSlices[] = {\n";
+            bool any = false;
+            for (int si = 0; si < S; ++si)
+                for (int ei = 0; ei < E; ++ei) {
+                    auto c = cellIndex[static_cast<size_t>(si) * E + ei];
+                    if (c.first < 0) continue;
+                    any = true;
+                    o << "    { " << (si * E + ei) << ", " << c.first << ", " << c.second
+                      << " },   // " << live[si]->name << " / " << m.events[ei] << "\n";
+                }
+            if (!any) o << "    { 0, -1, 0 }\n";
+            o << "};\n"
+              << "constexpr int kSliceCount = " << (any ? "sizeof(kSlices)/sizeof(kSlices[0])" : "0") << ";\n\n";
+        } else {
+            o << "// Sparse dispatch: the populated (state, event) cells are lowered to a\n"
+              << "// switch over the packed key, so the C++ compiler builds a jump table or\n"
+              << "// binary search for them. Empty cells are never stored anywhere.\n";
+        }
+
+        o << "const char* const kStateNames[] = {\n";
+        for (int i = 0; i < S; ++i) o << "    \"" << live[i]->name << "\",\n";
+        if (S == 0) o << "    \"<none>\"\n";
+        o << "};\n\n";
+
+        o << "const char* const kEventNames[] = {\n";
+        for (int i = 0; i < E; ++i) o << "    \"" << m.events[i] << "\",\n";
+        if (E == 0) o << "    \"<none>\"\n";
+        o << "};\n\n";
+
+        o << "} // namespace\n\n";
+
+        // --- ctor / reset -------------------------------------------------
+        o << cls << "::" << cls << "() { reset(); }\n\n"
+          << "void " << cls << "::reset() {\n"
+          << "    ctx = " << cls << "Context{};\n"
+          << "    state_ = " << cls << "State::" << live[startId]->name << ";\n";
+        if (!m.initEnterChain.empty()) {
+            o << "    // entry chain, outermost first\n";
+            for (int n : m.initEnterChain)
+                o << "    onEnterNode_(" << n << ");   // " << m.nodes[n].display() << "\n";
+        } else {
+            o << "    onEnterNode_(" << live[startId]->nodeId << ");\n";
+        }
+        o << "}\n\n";
+
+        // --- names --------------------------------------------------------
+        o << "const char* " << cls << "::stateName() const { return kStateNames[static_cast<int>(state_)]; }\n"
+          << "const char* " << cls << "::stateName(" << cls << "State s) { return kStateNames[static_cast<int>(s)]; }\n"
+          << "const char* " << cls << "::eventName(" << cls << "Event e) { return kEventNames[static_cast<int>(e)]; }\n\n";
+
+        // --- guards -------------------------------------------------------
+        o << "bool " << cls << "::guard_(uint16_t id) const {\n"
+          << "    switch (id) {\n";
+        for (size_t i = 0; i < guards.size(); ++i)
+            o << "        case " << i << ": return " << emitExpr(guards[i]) << ";\n";
+        o << "        default: return true;\n"
+          << "    }\n}\n\n";
+
+        // --- enter / exit -------------------------------------------------
+        o << "void " << cls << "::onEnterNode_(uint16_t node) {\n"
+          << "    switch (node) {\n";
+        for (size_t n = 0; n < m.nodes.size(); ++n) {
+            if (!m.nodes[n].hasEnter || m.nodes[n].onEnter.empty()) continue;
+            o << "        case " << n << ":   // " << m.nodes[n].display() << "\n";
+            emitBlock(o, m.nodes[n].onEnter, "            ", m);
+            o << "            break;\n";
+        }
+        o << "        default: break;\n    }\n}\n\n";
+
+        o << "void " << cls << "::onExitNode_(uint16_t node) {\n"
+          << "    switch (node) {\n";
+        for (size_t n = 0; n < m.nodes.size(); ++n) {
+            if (!m.nodes[n].hasExit || m.nodes[n].onExit.empty()) continue;
+            o << "        case " << n << ":   // " << m.nodes[n].display() << "\n";
+            emitBlock(o, m.nodes[n].onExit, "            ", m);
+            o << "            break;\n";
+        }
+        o << "        default: break;\n    }\n}\n\n";
+
+        o << "void " << cls << "::update() {\n"
+          << "    switch (state_) {\n";
+        for (int i = 0; i < S; ++i) {
+            if (!live[i]->hasUpdate || live[i]->onUpdate.empty()) continue;
+            o << "        case " << cls << "State::" << live[i]->name << ":\n";
+            emitBlock(o, live[i]->onUpdate, "            ", m);
+            o << "            break;\n";
+        }
+        o << "        default: break;\n    }\n}\n\n";
+
+        // --- dispatch -----------------------------------------------------
+        o << "bool " << cls << "::dispatch(" << cls << "Event ev) {\n"
+          << "    const int s = static_cast<int>(state_);\n"
+          << "    const int e = static_cast<int>(ev);\n"
+          << "    int first = -1;\n"
+          << "    int count = 0;\n\n";
+
+        if (plan.strategy == Strategy::DenseTable) {
+            o << "    // O(1): single indexed load into the dispatch matrix.\n"
+              << "    const Cell& c = kTable[s][e];\n"
+              << "    first = c.first;\n"
+              << "    count = c.count;\n\n";
+        } else if (plan.strategy == Strategy::LinearScan) {
+            o << "    // Linear scan over the populated cells. At this size the scan is\n"
+              << "    // shorter than the indirection an index would cost.\n"
+              << "    const uint16_t key = static_cast<uint16_t>(s * " << E << " + e);\n"
+              << "    for (int i = 0; i < kSliceCount; ++i) {\n"
+              << "        if (kSlices[i].key == key) { first = kSlices[i].first; count = kSlices[i].count; break; }\n"
+              << "    }\n\n";
+        } else {
+            o << "    // Sparse dispatch: switch over the packed key. The C++ compiler lowers\n"
+              << "    // this to a jump table or a binary search; nothing is stored for the\n"
+              << "    // empty cells.\n"
+              << "    switch (static_cast<uint16_t>(s * " << E << " + e)) {\n";
+            for (int si = 0; si < S; ++si)
+                for (int ei = 0; ei < E; ++ei) {
+                    auto c = cellIndex[static_cast<size_t>(si) * E + ei];
+                    if (c.first < 0) continue;
+                    o << "        case " << (si * E + ei) << ": first = " << c.first
+                      << "; count = " << c.second << "; break;   // "
+                      << live[si]->name << " / " << m.events[ei] << "\n";
+                }
+            o << "        default: return false;\n"
+              << "    }\n\n";
+        }
+
+        o << "    if (first < 0) return false;\n\n"
+          << "    for (int i = 0; i < count; ++i) {\n"
+          << "        const TransitionRec& t = kTransitions[first + i];\n"
+          << "        if (t.guard != kNoGuard && !guard_(static_cast<uint16_t>(t.guard))) continue;\n"
+          << "        // exit innermost-first, up to the common ancestor\n"
+          << "        for (uint8_t k = 0; k < t.exitCount; ++k) onExitNode_(kChain[t.exitFirst + k]);\n"
+          << "        state_ = static_cast<" << cls << "State>(t.target);\n"
+          << "        // enter outermost-first, down to the new leaf\n"
+          << "        for (uint8_t k = 0; k < t.enterCount; ++k) onEnterNode_(kChain[t.enterFirst + k]);\n"
+          << "        return true;\n"
+          << "    }\n"
+          << "    return false;\n"
+          << "}\n\n"
+          << "} // namespace aegis_gen\n";
+
+        out.source = o.str();
+    }
+
+    // ========================================================== DEMO ======
+    {
+        std::ostringstream o;
+        o << "// Integration smoke test generated alongside " << cls << ".\n"
+          << "// Drives the NPC through every declared event and prints the trace.\n"
+          << "#include \"" << cls << ".h\"\n"
+          << "#include <cstdio>\n\n";
+
+        // Stub definitions for the declared engine hooks, so the smoke test
+        // links on its own. A real engine replaces these with the real thing;
+        // printing is what makes the calls visible in the trace.
+        if (!m.actions.empty()) {
+            o << "// Stub engine hooks, so this smoke test links without a game attached.\n"
+              << "// Your engine supplies the real definitions; these just report the call.\n"
+              << "namespace aegis_gen {\nnamespace hooks {\n";
+            for (const auto& a : m.actions) {
+                o << "    void " << a.name << "(" << cls << "Context& ctx";
+                std::string fmt, args;
+                for (size_t i = 0; i < a.params.size(); ++i) {
+                    const std::string pn = a.paramNames[i].empty()
+                        ? ("arg" + std::to_string(i + 1)) : a.paramNames[i];
+                    o << ", " << cxxType(a.params[i]) << " " << pn;
+                    if (i) fmt += ", ";
+                    fmt  += pn + "=%" + (a.params[i] == VarType::Float ? std::string("g")
+                                       : a.params[i] == VarType::Bool  ? std::string("d")
+                                                                       : std::string("d"));
+                    args += ", " + (a.params[i] == VarType::Float
+                                    ? ("static_cast<double>(" + pn + ")")
+                                    : ("static_cast<int>(" + pn + ")"));
+                }
+                o << ") {\n"
+                  << "        (void)ctx;\n"
+                  << "        std::printf(\"    [engine] " << a.name
+                  << "(" << fmt << ")\\n\"" << args << ");\n"
+                  << "    }\n";
+            }
+            o << "} // namespace hooks\n} // namespace aegis_gen\n\n";
+        }
+
+        o << "int main() {\n"
+          << "    aegis_gen::" << cls << " npc;\n"
+          << "    std::printf(\"initial state : %s\\n\", npc.stateName());\n"
+          << "    const aegis_gen::" << cls << "Event kAll[] = {\n";
+        for (int i = 0; i < E; ++i)
+            o << "        aegis_gen::" << cls << "Event::" << m.events[i] << ",\n";
+        if (E == 0) o << "        // no events declared\n";
+        o << "    };\n"
+          << "    const int n = " << E << ";\n"
+          << "    for (int pass = 0; pass < 2; ++pass) {\n"
+          << "        for (int i = 0; i < n; ++i) {\n"
+          << "            const char* from = npc.stateName();\n"
+          << "            npc.update();\n"
+          << "            bool fired = npc.dispatch(kAll[i]);\n"
+          << "            std::printf(\"%-14s + %-16s -> %-14s %s\\n\",\n"
+          << "                        from, aegis_gen::" << cls << "::eventName(kAll[i]),\n"
+          << "                        npc.stateName(), fired ? \"\" : \"(ignored)\");\n"
+          << "        }\n"
+          << "    }\n"
+          << "    std::printf(\"final state   : %s\\n\", npc.stateName());\n"
+          << "    return 0;\n"
+          << "}\n";
+        out.demo = o.str();
+    }
+
+    return out;
+}
+
+} // namespace aegis

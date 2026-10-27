@@ -1,0 +1,49 @@
+// Large, sparse machine: exercises the SPARSE_SWITCH synthesis path.
+// Many declared events, but each state reacts to only one or two of them.
+machine Questline {
+
+    context {
+        int stage = 0;
+    }
+
+    events {
+        Accept, Decline, TalkNPC, FindItem, ReturnItem,
+        Betray, Forgive, Fail, Retry, Abandon
+    }
+
+    initial state Offered {
+        on Accept  -> Started;
+        on Decline -> Closed;
+    }
+
+    state Started {
+        on enter    { stage = 1; }
+        on TalkNPC  -> Investigating;
+        on Abandon  -> Closed;
+    }
+
+    state Investigating {
+        on enter   { stage = 2; }
+        on FindItem -> Carrying;
+        on Fail     -> Failed;
+    }
+
+    state Carrying {
+        on enter      { stage = 3; }
+        on ReturnItem -> Completed;
+        on Betray     -> Failed;
+    }
+
+    state Failed {
+        on Retry   -> Started;
+        on Abandon -> Closed;
+    }
+
+    state Completed {
+        on enter   { stage = 4; }
+        on TalkNPC -> Closed;
+    }
+
+    final state Closed {
+    }
+}

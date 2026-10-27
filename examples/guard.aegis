@@ -1,0 +1,77 @@
+// ---------------------------------------------------------------------------
+//  GuardAI - a patrolling NPC guard.
+//  Reference machine: medium complexity, dense transition graph.
+// ---------------------------------------------------------------------------
+
+machine GuardAI {
+
+    context {
+        int   alertLevel = 0;
+        float stamina    = 100.0;
+        bool  hasWeapon  = true;
+        int   searchTime = 0;
+    }
+
+    events {
+        PlayerSpotted,
+        PlayerLost,
+        Attacked,
+        Exhausted,
+        Recovered,
+        Killed
+    }
+
+    initial state Patrol {
+        on enter  { alertLevel = 0; searchTime = 0; }
+        on update { stamina = stamina + 0.5; }
+
+        on PlayerSpotted -> Chase when stamina > 20.0;
+        on PlayerSpotted -> Rest  when stamina <= 20.0;
+        on Attacked      -> Combat;
+        on Killed        -> Dead;
+    }
+
+    state Chase {
+        on enter  { alertLevel = 2; }
+        on update { stamina = stamina - 1.5; }
+        on exit   { searchTime = 0; }
+
+        on PlayerLost -> Search;
+        on Attacked   -> Combat;
+        on Exhausted  -> Rest;
+        on Killed     -> Dead;
+    }
+
+    state Combat {
+        on enter  { alertLevel = 3; }
+        on update { stamina = stamina - 2.0; }
+
+        on PlayerLost -> Search;
+        on Exhausted  -> Rest;
+        on Killed     -> Dead;
+    }
+
+    state Search {
+        on enter  { alertLevel = 1; }
+        on update { searchTime = searchTime + 1; }
+
+        on PlayerSpotted -> Chase when hasWeapon;
+        on PlayerLost    -> Patrol when searchTime > 3;
+        on Attacked      -> Combat;
+        on Killed        -> Dead;
+    }
+
+    state Rest {
+        on enter  { alertLevel = 0; }
+        on update { stamina = stamina + 3.0; }
+
+        on Recovered     -> Patrol;
+        on PlayerSpotted -> Chase when stamina > 40.0;
+        on Attacked      -> Combat;
+        on Killed        -> Dead;
+    }
+
+    final state Dead {
+        on enter { alertLevel = 0; hasWeapon = false; }
+    }
+}

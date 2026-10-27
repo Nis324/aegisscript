@@ -1,0 +1,16 @@
+// NEGATIVE TEST - expects AEG-E017 (composite with two initial children).
+machine Ambiguous {
+
+    events { Engage, Done }
+
+    initial state Idle {
+        on Engage -> Attack;
+    }
+
+    state Attack {
+        on Done -> Idle;
+
+        initial state Windup { on Done -> Strike; }
+        initial state Strike { on Done -> Windup; }   // <-- second initial
+    }
+}

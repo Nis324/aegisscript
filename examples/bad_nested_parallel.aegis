@@ -1,0 +1,12 @@
+// NEGATIVE TEST - expects AEG-E023 (nested parallel).
+machine TooDeep {
+    events { Go }
+    initial state Idle { on Go -> Outer; }
+    parallel state Outer {
+        parallel state Inner {      // <-- a region cannot itself be parallel
+            state A { initial state A1 { on Go -> A1; } }
+            state B { initial state B1 { on Go -> B1; } }
+        }
+        state Other { initial state O1 { on Go -> O1; } }
+    }
+}

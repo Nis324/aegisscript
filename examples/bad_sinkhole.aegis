@@ -1,0 +1,15 @@
+// NEGATIVE TEST - expects AEG-E012 (sinkhole).
+// 'Stunned' is reachable, has no way out, and is not declared final:
+// at runtime the NPC would freeze there forever.
+machine BrokenGuard {
+
+    events { Hit, Recover }
+
+    initial state Patrol {
+        on Hit -> Stunned;
+    }
+
+    state Stunned {
+        // no outgoing transitions, not final  <-- sinkhole
+    }
+}
